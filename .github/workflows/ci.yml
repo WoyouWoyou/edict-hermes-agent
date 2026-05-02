@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: edict/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: edict/frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: edict/frontend
+        run: npm run build
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: edict/backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r edict/backend/requirements.txt pytest
+
+      - name: Python syntax check
+        run: |
+          python -m py_compile $(find edict/backend scripts tests -name '*.py')
+
+      - name: Run Hermes migration tests
+        run: |
+          pytest \
+            tests/test_hermes_runtime.py \
+            tests/test_sync_agent_config.py \
+            tests/test_sync_from_hermes_runtime.py \
+            tests/test_sync_symlinks.py \
+            tests/test_state_machine_consistency.py \
+            tests/test_kanban.py \
+            -q
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Docker Compose config
+        run: docker compose --project-directory edict -f edict/docker-compose.yml -f edict/docker-compose.mac-light.yml config

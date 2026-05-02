@@ -1,0 +1,50 @@
+# macOS lightweight override.
+#
+# Use with:
+#   docker compose -f docker-compose.yml -f docker-compose.mac-light.yml up --build
+#
+# This keeps containers from auto-restarting with Docker Desktop and removes
+# backend hot reload to lower idle CPU on MacBook Air.
+
+services:
+  postgres:
+    restart: "no"
+    mem_limit: 384m
+    cpus: 0.50
+
+  redis:
+    restart: "no"
+    mem_limit: 128m
+    cpus: 0.25
+
+  backend:
+    restart: "no"
+    mem_limit: 512m
+    cpus: 0.75
+    environment:
+      DEBUG: "false"
+    command: >
+      sh -c "
+        python -m alembic upgrade head &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000
+      "
+
+  orchestrator:
+    restart: "no"
+    mem_limit: 256m
+    cpus: 0.25
+
+  outbox-relay:
+    restart: "no"
+    mem_limit: 256m
+    cpus: 0.25
+
+  dispatcher:
+    restart: "no"
+    mem_limit: 1024m
+    cpus: 1.00
+
+  frontend:
+    restart: "no"
+    mem_limit: 128m
+    cpus: 0.25

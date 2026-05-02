@@ -1,0 +1,79 @@
+[
+  {
+    "id": "taizi",
+    "name": "taizi",
+    "profile": "taizi",
+    "workspace": ".hermes/profiles/taizi",
+    "subagents": { "allowAgents": ["zhongshu"] }
+  },
+  {
+    "id": "zhongshu",
+    "name": "zhongshu",
+    "profile": "zhongshu",
+    "workspace": ".hermes/profiles/zhongshu",
+    "subagents": { "allowAgents": ["menxia", "shangshu"] }
+  },
+  {
+    "id": "menxia",
+    "name": "menxia",
+    "profile": "menxia",
+    "workspace": ".hermes/profiles/menxia",
+    "subagents": { "allowAgents": ["shangshu", "zhongshu"] }
+  },
+  {
+    "id": "shangshu",
+    "name": "shangshu",
+    "profile": "shangshu",
+    "workspace": ".hermes/profiles/shangshu",
+    "subagents": { "allowAgents": ["zhongshu", "menxia", "hubu", "libu", "bingbu", "xingbu", "gongbu", "libu_hr"] }
+  },
+  {
+    "id": "hubu",
+    "name": "hubu",
+    "profile": "hubu",
+    "workspace": ".hermes/profiles/hubu",
+    "subagents": { "allowAgents": ["shangshu"] }
+  },
+  {
+    "id": "libu",
+    "name": "libu",
+    "profile": "libu",
+    "workspace": ".hermes/profiles/libu",
+    "subagents": { "allowAgents": ["shangshu"] }
+  },
+  {
+    "id": "bingbu",
+    "name": "bingbu",
+    "profile": "bingbu",
+    "workspace": ".hermes/profiles/bingbu",
+    "subagents": { "allowAgents": ["shangshu"] }
+  },
+  {
+    "id": "xingbu",
+    "name": "xingbu",
+    "profile": "xingbu",
+    "workspace": ".hermes/profiles/xingbu",
+    "subagents": { "allowAgents": ["shangshu"] }
+  },
+  {
+    "id": "gongbu",
+    "name": "gongbu",
+    "profile": "gongbu",
+    "workspace": ".hermes/profiles/gongbu",
+    "subagents": { "allowAgents": ["shangshu"] }
+  },
+  {
+    "id": "libu_hr",
+    "name": "libu_hr",
+    "profile": "libu_hr",
+    "workspace": ".hermes/profiles/libu_hr",
+    "subagents": { "allowAgents": ["shangshu"] }
+  },
+  {
+    "id": "zaochao",
+    "name": "zaochao",
+    "profile": "zaochao",
+    "workspace": ".hermes/profiles/zaochao",
+    "subagents": { "allowAgents": [] }
+  }
+]

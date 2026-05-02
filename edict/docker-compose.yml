@@ -1,0 +1,189 @@
+# ══════════════════════════════════════════════════════
+# Edict Hermes Agent — event-driven dashboard + Hermes dispatcher
+# ══════════════════════════════════════════════════════
+
+services:
+  # ── 基础设施 ──
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-edict}
+      POSTGRES_USER: ${POSTGRES_USER:-edict}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-edict_secret_change_me}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U edict"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ── 后端服务 ──
+
+  backend:
+    build:
+      context: ..
+      dockerfile: edict/Dockerfile
+      additional_contexts:
+        hermes_agent: ${HERMES_AGENT_CONTEXT:-https://github.com/NousResearch/hermes-agent.git}
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-edict}:${POSTGRES_PASSWORD:-edict_secret_change_me}@postgres:5432/${POSTGRES_DB:-edict}
+      REDIS_URL: redis://redis:6379/0
+      PORT: 8000
+      DEBUG: "true"
+      HERMES_HOME: /app/.hermes
+      HERMES_PROJECT_DIR: /app
+      HERMES_SOURCE: edict
+      DISPATCH_HERMES_TOOLSETS: ${DISPATCH_HERMES_TOOLSETS:-search}
+      DISPATCH_HERMES_MAX_TURNS: ${DISPATCH_HERMES_MAX_TURNS:-3}
+      HERMES_PROVIDER: ${HERMES_PROVIDER:-}
+      HERMES_MODEL: ${HERMES_MODEL:-}
+      HERMES_TOOLSETS: ${HERMES_TOOLSETS:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      COURT_HERMES_ENABLED: ${COURT_HERMES_ENABLED:-true}
+      COURT_HERMES_CONCURRENCY: ${COURT_HERMES_CONCURRENCY:-2}
+      COURT_HERMES_TIMEOUT_SEC: ${COURT_HERMES_TIMEOUT_SEC:-120}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    volumes:
+      - ../agents:/app/agents:ro
+      - ../scripts:/app/scripts:ro
+      - ../data:/app/data
+      - hermes_data:/app/.hermes
+    command: >
+      sh -c "
+        python -m alembic upgrade head &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+    restart: unless-stopped
+
+  # ── Worker 进程 ──
+
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: edict/Dockerfile
+      additional_contexts:
+        hermes_agent: ${HERMES_AGENT_CONTEXT:-https://github.com/NousResearch/hermes-agent.git}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-edict}:${POSTGRES_PASSWORD:-edict_secret_change_me}@postgres:5432/${POSTGRES_DB:-edict}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      backend:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m app.workers.orchestrator_worker
+    restart: unless-stopped
+
+  outbox-relay:
+    build:
+      context: ..
+      dockerfile: edict/Dockerfile
+      additional_contexts:
+        hermes_agent: ${HERMES_AGENT_CONTEXT:-https://github.com/NousResearch/hermes-agent.git}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-edict}:${POSTGRES_PASSWORD:-edict_secret_change_me}@postgres:5432/${POSTGRES_DB:-edict}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      backend:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m app.workers.outbox_relay
+    restart: unless-stopped
+
+  dispatcher:
+    build:
+      context: ..
+      dockerfile: edict/Dockerfile
+      additional_contexts:
+        hermes_agent: ${HERMES_AGENT_CONTEXT:-https://github.com/NousResearch/hermes-agent.git}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-edict}:${POSTGRES_PASSWORD:-edict_secret_change_me}@postgres:5432/${POSTGRES_DB:-edict}
+      REDIS_URL: redis://redis:6379/0
+      HERMES_HOME: /app/.hermes
+      HERMES_PROJECT_DIR: /app
+      HERMES_SOURCE: edict
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      HERMES_PROVIDER: ${HERMES_PROVIDER:-}
+      HERMES_MODEL: ${HERMES_MODEL:-}
+      HERMES_TOOLSETS: ${HERMES_TOOLSETS:-}
+    depends_on:
+      backend:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../agents:/app/agents:ro
+      - ../scripts:/app/scripts
+      - ../data:/app/data
+      - hermes_data:/app/.hermes
+    command: >
+      sh -c "
+        python /app/scripts/bootstrap_hermes_profiles.py --hermes-home /app/.hermes &&
+        python /app/scripts/sync_agent_config.py &&
+        python -m app.workers.dispatch_worker
+      "
+    restart: unless-stopped
+
+  # ── 前端 ──
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_URL: http://localhost:8000
+      VITE_WS_URL: ws://localhost:8000/ws
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  redis_data:
+  hermes_data:
