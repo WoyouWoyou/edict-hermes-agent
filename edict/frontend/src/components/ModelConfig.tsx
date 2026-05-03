@@ -53,6 +53,8 @@ export default function ModelConfig() {
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState<Record<string, boolean>>({});
   const [results, setResults] = useState<Record<string, HermesProfileTestResult>>({});
+  const [modelInputs, setModelInputs] = useState<Record<string, string>>({});
+  const [savingModel, setSavingModel] = useState<Record<string, boolean>>({});
   const [channelSel, setChannelSel] = useState('feishu');
   const [channelStatus, setChannelStatus] = useState('');
 
@@ -62,6 +64,13 @@ export default function ModelConfig() {
       const data = await api.hermesProfileStatus();
       setProfiles(data.agents || []);
       setHermesHome(data.hermesHome || '');
+      setModelInputs((prev) => {
+        const next = { ...prev };
+        for (const agent of data.agents || []) {
+          next[agent.id] = agent.modelOverride || '';
+        }
+        return next;
+      });
     } catch {
       toast('无法读取 Hermes profile 状态', 'err');
     } finally {
@@ -92,6 +101,21 @@ export default function ModelConfig() {
     }
   };
 
+  const saveModelOverride = async (agentId: string, explicitModel?: string) => {
+    const model = (explicitModel ?? modelInputs[agentId] ?? '').trim();
+    setSavingModel((prev) => ({ ...prev, [agentId]: true }));
+    try {
+      const result = await api.setModel(agentId, model);
+      if (!result.ok) throw new Error(result.error || '保存失败');
+      toast(result.message || '模型配置已保存', 'ok');
+      await Promise.all([loadAgentConfig(), loadProfiles()]);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '模型配置保存失败', 'err');
+    } finally {
+      setSavingModel((prev) => ({ ...prev, [agentId]: false }));
+    }
+  };
+
   if (loading && !profiles.length) {
     return <div className="empty" style={{ gridColumn: '1/-1' }}>正在读取 Hermes profile...</div>;
   }
@@ -105,7 +129,7 @@ export default function ModelConfig() {
       <div className="cl-wrap" style={{ marginBottom: 16 }}>
         <div className="cl-title">Hermes Profile 状态</div>
         <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.7 }}>
-          当前页面只读取 Hermes profile/config.yaml 与 .env。模型真正由 Hermes 自己决定；这里不再写入旧 OpenClaw 模型配置。
+          默认使用 Hermes profile/config.yaml 的模型；如为某个官员设置手动覆盖，Dispatcher 调用该 profile 时会优先传入这个模型。
         </div>
         <div style={{ marginTop: 8, fontSize: 11, color: 'var(--muted)', wordBreak: 'break-all' }}>
           HERMES_HOME: <b style={{ color: 'var(--text)' }}>{hermesHome || '未设置'}</b>
@@ -115,6 +139,14 @@ export default function ModelConfig() {
       <div className="model-grid">
         {profiles.map((ag) => {
           const canTest = ag.profileExists && ag.configExists;
+          const input = modelInputs[ag.id] || '';
+          const changed = input.trim() !== (ag.modelOverride || '');
+          const modelOptions = [
+            ...(agentConfig?.knownModels || []).map((m) => m.id),
+            ag.hermesModel,
+            ag.modelOverride,
+            ag.model,
+          ].filter((v, idx, arr): v is string => !!v && arr.indexOf(v) === idx);
           return (
             <div className="mc-card" key={ag.id}>
               <div className="mc-top">
@@ -134,12 +166,40 @@ export default function ModelConfig() {
                 <Badge ok={ag.envExists} text=".env" />
               </div>
 
-              <div className="mc-cur">模型: <b>{ag.model || 'Hermes 默认配置'}</b></div>
+              <div className="mc-cur">生效模型: <b>{ag.model || 'Hermes 默认配置'}</b></div>
+              <div className="mc-cur">Hermes 配置: <b>{ag.hermesModel || '未读取到'}</b></div>
+              <div className="mc-cur">手动覆盖: <b>{ag.modelOverride || '未设置'}</b></div>
               <div className="mc-cur">Provider: <b>{ag.provider || '由 Hermes 推断'}</b></div>
               <div className="mc-cur">技能: <b>{ag.skillsCount}</b> 个</div>
               <div className="mc-cur" style={{ wordBreak: 'break-all' }}>Profile: <b>{ag.profile}</b></div>
 
+              <div style={{ marginTop: 10 }}>
+                <input
+                  className="msel"
+                  list={`models-${ag.id}`}
+                  placeholder="留空则回落 Hermes profile 模型"
+                  value={input}
+                  onChange={(e) => setModelInputs((prev) => ({ ...prev, [ag.id]: e.target.value }))}
+                />
+                <datalist id={`models-${ag.id}`}>
+                  {modelOptions.map((model) => <option value={model} key={model} />)}
+                </datalist>
+              </div>
+
               <div className="mc-btns">
+                <button className="btn btn-p" disabled={!changed || savingModel[ag.id]} onClick={() => saveModelOverride(ag.id)}>
+                  {savingModel[ag.id] ? '保存中...' : input.trim() ? '应用覆盖' : '回落 Hermes'}
+                </button>
+                <button
+                  className="btn btn-g"
+                  disabled={!ag.modelOverride || savingModel[ag.id]}
+                  onClick={() => {
+                    setModelInputs((prev) => ({ ...prev, [ag.id]: '' }));
+                    saveModelOverride(ag.id, '');
+                  }}
+                >
+                  清除覆盖
+                </button>
                 <button className="btn btn-p" disabled={!canTest || testing[ag.id]} onClick={() => testProfile(ag.id)}>
                   {testing[ag.id] ? '测试中...' : '轻量测试'}
                 </button>

@@ -178,6 +178,9 @@ export interface AgentInfo {
   role: string;
   duty?: string;
   model: string;
+  hermesModel?: string;
+  modelOverride?: string;
+  modelSource?: 'hermes' | 'manual';
   defaultModel?: string;
   workspace?: string;
   profile?: string;
@@ -283,6 +286,9 @@ export interface HermesProfileInfo {
   skillsCount: number;
   skills: SkillInfo[];
   model: string;
+  hermesModel: string;
+  modelOverride: string;
+  modelSource: 'hermes' | 'manual';
   provider?: string;
   runtime: string;
 }

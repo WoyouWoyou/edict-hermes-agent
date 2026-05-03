@@ -186,6 +186,21 @@ def _resolve_project_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[4]
 
 
+def _read_json(path: pathlib.Path, default):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _agent_model_override(agent_id: str) -> str:
+    cfg = _read_json(_resolve_project_root() / "data" / "agent_config.json", {})
+    overrides = cfg.get("modelOverrides", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(overrides, dict):
+        return ""
+    return str(overrides.get(agent_id, "") or "").strip()
+
+
 def _build_memory_context(agent_id: str, task_id: str, payload: dict) -> str:
     """分层注入三级记忆：全局规则 → Agent 经验 → 任务上下文。"""
     root = _resolve_project_root()
@@ -585,7 +600,10 @@ class DispatchWorker:
             "--source", settings.hermes_source,
             "--max-turns", max_turns,
         ]
-        if settings.hermes_model:
+        model_override = _agent_model_override(agent)
+        if model_override:
+            cmd.extend(["--model", model_override])
+        elif settings.hermes_model:
             cmd.extend(["--model", settings.hermes_model])
         if settings.hermes_provider:
             cmd.extend(["--provider", settings.hermes_provider])

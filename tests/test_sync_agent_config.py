@@ -27,6 +27,10 @@ def test_sync_agent_config_uses_hermes_profiles(tmp_path, monkeypatch):
     agents_json.write_text(json.dumps([
         {"id": "taizi", "allowAgents": ["zhongshu"]},
     ], ensure_ascii=False), encoding="utf-8")
+    data_dir.mkdir()
+    (data_dir / "agent_config.json").write_text(json.dumps({
+        "modelOverrides": {"taizi": "openai/gpt-4o-mini"}
+    }, ensure_ascii=False), encoding="utf-8")
 
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setattr(sync_agent_config, "DATA", data_dir)
@@ -42,6 +46,10 @@ def test_sync_agent_config_uses_hermes_profiles(tmp_path, monkeypatch):
     assert taizi["runtime"] == "hermes"
     assert taizi["profile"] == str(profile)
     assert taizi["profileExists"] is True
-    assert taizi["model"] == "openai/gpt-4o"
+    assert taizi["hermesModel"] == "openai/gpt-4o"
+    assert taizi["model"] == "openai/gpt-4o-mini"
+    assert taizi["modelOverride"] == "openai/gpt-4o-mini"
+    assert taizi["modelSource"] == "manual"
     assert taizi["allowAgents"] == ["zhongshu"]
     assert taizi["skills"][0]["name"] == "demo"
+    assert out["modelOverrides"]["taizi"] == "openai/gpt-4o-mini"

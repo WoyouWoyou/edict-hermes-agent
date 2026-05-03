@@ -153,10 +153,11 @@ def load_agent_entries():
     return entries
 
 
-def _collect_hermes_models(default_model: str, entries: list[dict]) -> list[dict]:
+def _collect_hermes_models(default_model: str, entries: list[dict], overrides: dict[str, str] | None = None) -> list[dict]:
     known = {m["id"] for m in KNOWN_MODELS}
     models = list(KNOWN_MODELS)
-    for model_id in [default_model, *(get_model(e["id"], default_model) for e in entries)]:
+    override_values = list((overrides or {}).values())
+    for model_id in [default_model, *(get_model(e["id"], default_model) for e in entries), *override_values]:
         if model_id and model_id not in known:
             provider = model_id.split("/", 1)[0] if "/" in model_id else "Hermes"
             models.append({"id": model_id, "label": model_id, "provider": provider})
@@ -205,14 +206,21 @@ def sync_scripts_to_workspaces():
 def main():
     entries = load_agent_entries()
     default_model = os.environ.get("HERMES_MODEL", "anthropic/claude-sonnet-4-6")
-    known_models = _collect_hermes_models(default_model, entries)
 
     existing_cfg = read_json(DATA / "agent_config.json", {})
+    model_overrides = existing_cfg.get("modelOverrides", {}) if isinstance(existing_cfg, dict) else {}
+    if not isinstance(model_overrides, dict):
+        model_overrides = {}
+    model_overrides = {str(k): str(v).strip() for k, v in model_overrides.items() if str(v).strip()}
+    known_models = _collect_hermes_models(default_model, entries, model_overrides)
     result = []
     for entry in entries:
         agent_id = entry["id"]
         meta = ID_LABEL[agent_id]
         pdir = profile_dir(agent_id)
+        hermes_model = get_model(agent_id, default_model)
+        model_override = model_overrides.get(agent_id, "")
+        effective_model = model_override or hermes_model
         allow_agents = entry.get("allowAgents")
         if allow_agents is None:
             allow_agents = entry.get("subagents", {}).get("allowAgents", [])
@@ -222,7 +230,10 @@ def main():
             "role": meta["role"],
             "duty": meta["duty"],
             "emoji": meta["emoji"],
-            "model": get_model(agent_id, default_model),
+            "model": effective_model,
+            "hermesModel": hermes_model,
+            "modelOverride": model_override,
+            "modelSource": "manual" if model_override else "hermes",
             "defaultModel": default_model,
             "workspace": str(pdir),
             "profile": str(pdir),
@@ -238,6 +249,7 @@ def main():
         "hermesHome": str(hermes_root()),
         "defaultModel": default_model,
         "knownModels": known_models,
+        "modelOverrides": model_overrides,
         "dispatchChannel": existing_cfg.get("dispatchChannel") or os.getenv("DEFAULT_DISPATCH_CHANNEL", ""),
         "agents": result,
     }

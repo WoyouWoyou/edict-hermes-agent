@@ -545,6 +545,18 @@ def _profile_skill_dir(agent_id: str, skill_name: str) -> Path:
     return _profile_dir(agent_id) / "skills" / skill_name
 
 
+def _model_overrides() -> dict[str, str]:
+    cfg = _read_json("agent_config.json", {})
+    overrides = cfg.get("modelOverrides", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(overrides, dict):
+        return {}
+    return {str(k): str(v).strip() for k, v in overrides.items() if str(v).strip()}
+
+
+def _agent_model_override(agent_id: str) -> str:
+    return _model_overrides().get(agent_id, "")
+
+
 def _read_profile_scalar(config_path: Path, key: str) -> str:
     if not config_path.exists():
         return ""
@@ -565,7 +577,9 @@ def _profile_status(agent_id: str, agent_row: dict[str, Any] | None = None) -> d
     env_path = pdir / ".env"
     skills_dir = pdir / "skills"
     meta = AGENT_META.get(agent_id, {})
-    model = _read_profile_scalar(config_path, "model") or (agent_row or {}).get("model") or ""
+    hermes_model = _read_profile_scalar(config_path, "model") or (agent_row or {}).get("hermesModel") or (agent_row or {}).get("model") or ""
+    model_override = _model_overrides().get(agent_id, "") or (agent_row or {}).get("modelOverride") or ""
+    model = model_override or hermes_model
     provider = _read_profile_scalar(config_path, "provider")
     skills = (agent_row or {}).get("skills") or []
     if not isinstance(skills, list):
@@ -589,6 +603,9 @@ def _profile_status(agent_id: str, agent_row: dict[str, Any] | None = None) -> d
         "skillsCount": len(skills),
         "skills": skills,
         "model": model,
+        "hermesModel": hermes_model,
+        "modelOverride": model_override,
+        "modelSource": "manual" if model_override else "hermes",
         "provider": provider,
         "runtime": "hermes",
     }
@@ -984,7 +1001,10 @@ def _call_hermes_court_official(
         official["id"],
         "--accept-hooks",
     ]
-    if settings.hermes_model:
+    model_override = _agent_model_override(official["id"])
+    if model_override:
+        cmd.extend(["--model", model_override])
+    elif settings.hermes_model:
         cmd.extend(["--model", settings.hermes_model])
     if settings.hermes_provider:
         cmd.extend(["--provider", settings.hermes_provider])
@@ -1198,6 +1218,9 @@ async def hermes_profile_test(body: ProfileTestBody):
         "-q",
         prompt,
     ]
+    model_override = _agent_model_override(agent_id)
+    if model_override:
+        cmd[-2:-2] = ["--model", model_override]
     env = os.environ.copy()
     env["HERMES_HOME"] = str(_hermes_home())
     env["HERMES_PROJECT_DIR"] = settings.hermes_project_dir or str(_project_root())
@@ -1471,21 +1494,41 @@ async def agent_wake(body: AgentWakeBody):
 
 @router.post("/set-model")
 async def set_model(body: ModelBody):
+    agent_id = _validate_agent_id(body.agentId)
+    model = body.model.strip()[:200]
     cfg = _read_json("agent_config.json", {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    overrides = cfg.get("modelOverrides", {})
+    if not isinstance(overrides, dict):
+        overrides = {}
+    old_override = str(overrides.get(agent_id, "") or "")
+    if model:
+        overrides[agent_id] = model
+    else:
+        overrides.pop(agent_id, None)
+    cfg["modelOverrides"] = overrides
+
     changes = _read_json("model_change_log.json", [])
+    if not isinstance(changes, list):
+        changes = []
     changes.append({
         "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "agentId": body.agentId,
-        "oldModel": "",
-        "newModel": body.model,
+        "agentId": agent_id,
+        "oldModel": old_override or "Hermes profile",
+        "newModel": model or "Hermes profile",
+        "action": "setOverride" if model else "clearOverride",
     })
     _write_json("model_change_log.json", changes[-100:])
-    if isinstance(cfg, dict):
-        for agent in cfg.get("agents", []):
-            if agent.get("id") == body.agentId:
-                agent["model"] = body.model
-        _write_json("agent_config.json", cfg)
-    return {"ok": True, "message": "看板配置已记录；实际推理模型仍以 Hermes profile/config.yaml 为准"}
+    for agent in cfg.get("agents", []):
+        if isinstance(agent, dict) and agent.get("id") == agent_id:
+            hermes_model = agent.get("hermesModel") or agent.get("model") or ""
+            agent["modelOverride"] = model
+            agent["modelSource"] = "manual" if model else "hermes"
+            agent["model"] = model or hermes_model
+    _write_json("agent_config.json", cfg)
+    message = f"{agent_id} 已使用手动模型覆盖：{model}" if model else f"{agent_id} 已回落到 Hermes profile 模型"
+    return {"ok": True, "message": message}
 
 
 @router.post("/set-dispatch-channel")
