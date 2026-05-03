@@ -400,6 +400,9 @@ export const useStore = create<AppStore>((set, get) => ({
     await s.loadLive();
     const tab = s.activeTab;
     if (['models', 'skills'].includes(tab)) await s.loadAgentConfig();
+    if (tab === 'monitor') {
+      await Promise.all([s.loadAgentsStatus(), s.loadOfficials()]);
+    }
   },
 }));
 

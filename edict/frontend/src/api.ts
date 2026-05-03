@@ -243,6 +243,7 @@ export interface AgentStatusInfo {
   status: 'running' | 'idle' | 'offline' | 'unconfigured';
   statusLabel: string;
   lastActive?: string;
+  profileExists?: boolean;
 }
 
 export interface GatewayStatus {

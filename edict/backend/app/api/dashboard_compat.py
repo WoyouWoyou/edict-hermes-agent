@@ -1040,21 +1040,37 @@ async def agents_status(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Task).order_by(Task.updated_at.desc()).limit(1000))
     stats = _build_officials_from_tasks(list(result.scalars().all()))
     by_agent = {row["id"]: row for row in stats["officials"]}
+
+    def status_for(agent_id: str) -> tuple[str, str]:
+        profile_exists = _profile_dir(agent_id).exists()
+        if not profile_exists:
+            return "unconfigured", "Hermes profile 未初始化"
+        heartbeat = (by_agent.get(agent_id) or {}).get("heartbeat", {})
+        raw_status = heartbeat.get("status", "idle")
+        label = heartbeat.get("label", "")
+        if raw_status == "active":
+            return "running", label or "任务处理中"
+        if raw_status == "unknown":
+            return "offline", label or "状态未知"
+        return "idle", label or "Hermes profile 待命"
+
+    def agent_row(agent_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+        status, label = status_for(agent_id)
+        return {
+            "id": agent_id,
+            "label": meta["label"],
+            "emoji": meta["emoji"],
+            "role": meta["role"],
+            "status": status,
+            "statusLabel": label,
+            "lastActive": (by_agent.get(agent_id) or {}).get("last_active") or "",
+            "profileExists": status != "unconfigured",
+        }
+
     return {
         "ok": True,
         "gateway": {"alive": True, "probe": True, "status": "hermes-dispatcher"},
-        "agents": [
-            {
-                "id": agent_id,
-                "label": meta["label"],
-                "emoji": meta["emoji"],
-                "role": meta["role"],
-                "status": (by_agent.get(agent_id) or {}).get("heartbeat", {}).get("status", "idle"),
-                "statusLabel": (by_agent.get(agent_id) or {}).get("heartbeat", {}).get("label", "Hermes profile 待命"),
-                "lastActive": (by_agent.get(agent_id) or {}).get("last_active") or "",
-            }
-            for agent_id, meta in AGENT_META.items()
-        ],
+        "agents": [agent_row(agent_id, meta) for agent_id, meta in AGENT_META.items()],
         "checkedAt": checked_at,
     }
 

@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useStore, DEPTS, isEdict, stateLabel } from '../store';
-import { api, type OfficialInfo } from '../api';
+import type { OfficialInfo } from '../api';
 
 export default function MonitorPanel() {
   const liveStatus = useStore((s) => s.liveStatus);
@@ -8,7 +8,6 @@ export default function MonitorPanel() {
   const officialsData = useStore((s) => s.officialsData);
   const loadAgentsStatus = useStore((s) => s.loadAgentsStatus);
   const setModalTaskId = useStore((s) => s.setModalTaskId);
-  const toast = useStore((s) => s.toast);
 
   useEffect(() => {
     loadAgentsStatus();
@@ -22,29 +21,6 @@ export default function MonitorPanel() {
   if (officialsData?.officials) {
     officialsData.officials.forEach((o) => { offMap[o.id] = o; });
   }
-
-  // Agent wake
-  const handleWake = async (agentId: string) => {
-    try {
-      const r = await api.agentWake(agentId);
-      toast(r.message || '唤醒指令已发出');
-      setTimeout(() => loadAgentsStatus(), 30000);
-    } catch { toast('唤醒失败', 'err'); }
-  };
-
-  const handleWakeAll = async () => {
-    if (!agentsStatusData) return;
-    const toWake = agentsStatusData.agents.filter(
-      (a) => a.id !== 'main' && a.status !== 'running' && a.status !== 'unconfigured'
-    );
-    if (!toWake.length) { toast('所有 Agent 均已在线'); return; }
-    toast(`正在唤醒 ${toWake.length} 个 Agent...`);
-    for (const a of toWake) {
-      try { await api.agentWake(a.id); } catch { /* ignore */ }
-    }
-    toast(`${toWake.length} 个唤醒指令已发出，30秒后刷新状态`);
-    setTimeout(() => loadAgentsStatus(), 30000);
-  };
 
   // Agent Status Panel
   const asData = agentsStatusData;
@@ -62,20 +38,14 @@ export default function MonitorPanel() {
       {asData && asData.ok && (
         <div className="as-panel">
           <div className="as-header">
-            <span className="as-title">🔌 Agent 在线状态</span>
-            <span className={`as-gw ${gwCls}`}>Gateway: {gw?.status || '未知'}</span>
+            <span className="as-title">🔌 Hermes 调度状态</span>
+            <span className={`as-gw ${gwCls}`}>Dispatcher: {gw?.status || '未知'}</span>
             <button className="btn-refresh" onClick={() => loadAgentsStatus()} style={{ marginLeft: 8 }}>
               🔄 刷新
             </button>
-            {(offline + unconf > 0) && (
-              <button className="btn-refresh" onClick={handleWakeAll} style={{ marginLeft: 4, borderColor: 'var(--warn)', color: 'var(--warn)' }}>
-                ⚡ 全部唤醒
-              </button>
-            )}
           </div>
           <div className="as-grid">
             {filtered.map((a) => {
-              const canWake = a.status !== 'running' && a.status !== 'unconfigured' && gw?.alive;
               return (
                 <div key={a.id} className="as-card" title={`${a.role} · ${a.statusLabel}`}>
                   <div className={`as-dot ${a.status}`} />
@@ -87,11 +57,6 @@ export default function MonitorPanel() {
                     <div style={{ fontSize: 10, color: 'var(--muted)' }}>⏰ {a.lastActive}</div>
                   ) : (
                     <div style={{ fontSize: 10, color: 'var(--muted)' }}>无活动记录</div>
-                  )}
-                  {canWake && (
-                    <button className="as-wake-btn" onClick={(e) => { e.stopPropagation(); handleWake(a.id); }}>
-                      ⚡ 唤醒
-                    </button>
                   )}
                 </div>
               );
