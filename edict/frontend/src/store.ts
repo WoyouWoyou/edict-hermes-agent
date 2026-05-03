@@ -62,7 +62,7 @@ export function isEdict(t: Task): boolean {
 }
 
 export function isSession(t: Task): boolean {
-  return /^(OC-|MC-)/i.test(t.id || '');
+  return /^(HM-|MC-)/i.test(t.id || '');
 }
 
 export function isArchived(t: Task): boolean {

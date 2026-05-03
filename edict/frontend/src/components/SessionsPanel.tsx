@@ -18,7 +18,7 @@ function useAgentMaps() {
 }
 
 function extractAgent(t: Task): string {
-  const m = (t.id || '').match(/^OC-(\w+)-/);
+  const m = (t.id || '').match(/^(?:HM|MC)-(\w+)-/i);
   if (m) return m[1];
   return (t.org || '').replace(/省|部/g, '').toLowerCase();
 }
