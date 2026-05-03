@@ -2,7 +2,10 @@
 
 <p align="center">
   <strong>一个基于 Hermes Agent 的可观测多 Agent 协作控制台。</strong><br>
-  用“三省六部”的制度流转，把复杂任务拆成分拣、起草、审议、派发、执行、回奏。
+  用“三省六部”的制度流转，把复杂任务拆成分拣、起草、审议、派发、执行、回奏。<br>
+  项目来源：https://github.com/cft0808/edict<br>
+  本人已经使用Hermes- agent为主，故做了迁移。
+  
 </p>
 
 <p align="center">
