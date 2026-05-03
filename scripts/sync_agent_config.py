@@ -90,6 +90,21 @@ def read_json(path: pathlib.Path, default):
         return default
 
 
+def read_model_overrides() -> dict[str, str]:
+    override_path = DATA / "hermes_model_overrides.json"
+    if override_path.exists():
+        payload = read_json(override_path, {})
+        raw = payload.get("overrides", payload) if isinstance(payload, dict) else {}
+        if not isinstance(raw, dict):
+            return {}
+        return {str(k): str(v).strip() for k, v in raw.items() if str(v).strip()}
+    existing_cfg = read_json(DATA / "agent_config.json", {})
+    raw = existing_cfg.get("modelOverrides", {}) if isinstance(existing_cfg, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v).strip() for k, v in raw.items() if str(v).strip()}
+
+
 def _read_scalar_config_value(config_path: pathlib.Path, key: str) -> str:
     if not config_path.exists():
         return ""
@@ -208,10 +223,7 @@ def main():
     default_model = os.environ.get("HERMES_MODEL", "anthropic/claude-sonnet-4-6")
 
     existing_cfg = read_json(DATA / "agent_config.json", {})
-    model_overrides = existing_cfg.get("modelOverrides", {}) if isinstance(existing_cfg, dict) else {}
-    if not isinstance(model_overrides, dict):
-        model_overrides = {}
-    model_overrides = {str(k): str(v).strip() for k, v in model_overrides.items() if str(v).strip()}
+    model_overrides = read_model_overrides()
     known_models = _collect_hermes_models(default_model, entries, model_overrides)
     result = []
     for entry in entries:

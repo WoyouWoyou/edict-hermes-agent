@@ -28,8 +28,8 @@ def test_sync_agent_config_uses_hermes_profiles(tmp_path, monkeypatch):
         {"id": "taizi", "allowAgents": ["zhongshu"]},
     ], ensure_ascii=False), encoding="utf-8")
     data_dir.mkdir()
-    (data_dir / "agent_config.json").write_text(json.dumps({
-        "modelOverrides": {"taizi": "openai/gpt-4o-mini"}
+    (data_dir / "hermes_model_overrides.json").write_text(json.dumps({
+        "overrides": {"taizi": "openai/gpt-4o-mini"}
     }, ensure_ascii=False), encoding="utf-8")
 
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -53,3 +53,39 @@ def test_sync_agent_config_uses_hermes_profiles(tmp_path, monkeypatch):
     assert taizi["allowAgents"] == ["zhongshu"]
     assert taizi["skills"][0]["name"] == "demo"
     assert out["modelOverrides"]["taizi"] == "openai/gpt-4o-mini"
+
+
+def test_model_override_file_takes_precedence_when_empty(tmp_path, monkeypatch):
+    sync_agent_config = _load_sync_agent_config()
+
+    data_dir = tmp_path / "data"
+    hermes_home = tmp_path / ".hermes"
+    profile = hermes_home / "profiles" / "taizi"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model: openai/gpt-4o\n", encoding="utf-8")
+
+    agents_json = tmp_path / "agents.json"
+    agents_json.write_text(json.dumps([
+        {"id": "taizi", "allowAgents": []},
+    ], ensure_ascii=False), encoding="utf-8")
+    data_dir.mkdir()
+    (data_dir / "agent_config.json").write_text(json.dumps({
+        "modelOverrides": {"taizi": "openai/gpt-4o-mini"}
+    }, ensure_ascii=False), encoding="utf-8")
+    (data_dir / "hermes_model_overrides.json").write_text(json.dumps({
+        "overrides": {}
+    }, ensure_ascii=False), encoding="utf-8")
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(sync_agent_config, "DATA", data_dir)
+    monkeypatch.setattr(sync_agent_config, "AGENTS_JSON", agents_json)
+    monkeypatch.setattr(sync_agent_config, "AGENT_ORDER", ["taizi"])
+
+    sync_agent_config.main()
+
+    out = json.loads((data_dir / "agent_config.json").read_text(encoding="utf-8"))
+    taizi = out["agents"][0]
+    assert taizi["model"] == "openai/gpt-4o"
+    assert taizi["modelOverride"] == ""
+    assert taizi["modelSource"] == "hermes"
+    assert out["modelOverrides"] == {}

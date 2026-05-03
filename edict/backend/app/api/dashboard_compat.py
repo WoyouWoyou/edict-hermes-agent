@@ -243,6 +243,29 @@ def _write_json(name: str, payload: Any) -> None:
     (_data_dir() / name).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _read_model_overrides_file() -> dict[str, str]:
+    payload = _read_json("hermes_model_overrides.json", {})
+    if not isinstance(payload, dict):
+        return {}
+    raw = payload.get("overrides", payload)
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v).strip() for k, v in raw.items() if str(v).strip()}
+
+
+def _write_model_overrides_file(overrides: dict[str, str]) -> None:
+    cleaned = {str(k): str(v).strip() for k, v in overrides.items() if str(v).strip()}
+    _write_json(
+        "hermes_model_overrides.json",
+        {
+            "runtime": "hermes",
+            "description": "Per-agent model overrides set from the dashboard. Empty means fallback to Hermes profile/config.yaml.",
+            "updatedAt": _utc_now(),
+            "overrides": cleaned,
+        },
+    )
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -546,6 +569,8 @@ def _profile_skill_dir(agent_id: str, skill_name: str) -> Path:
 
 
 def _model_overrides() -> dict[str, str]:
+    if (_data_dir() / "hermes_model_overrides.json").exists():
+        return _read_model_overrides_file()
     cfg = _read_json("agent_config.json", {})
     overrides = cfg.get("modelOverrides", {}) if isinstance(cfg, dict) else {}
     if not isinstance(overrides, dict):
@@ -1507,6 +1532,7 @@ async def set_model(body: ModelBody):
         overrides[agent_id] = model
     else:
         overrides.pop(agent_id, None)
+    _write_model_overrides_file(overrides)
     cfg["modelOverrides"] = overrides
 
     changes = _read_json("model_change_log.json", [])

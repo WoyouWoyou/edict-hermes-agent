@@ -194,6 +194,11 @@ def _read_json(path: pathlib.Path, default):
 
 
 def _agent_model_override(agent_id: str) -> str:
+    model_override_file = _resolve_project_root() / "data" / "hermes_model_overrides.json"
+    if model_override_file.exists():
+        payload = _read_json(model_override_file, {})
+        raw = payload.get("overrides", payload) if isinstance(payload, dict) else {}
+        return str(raw.get(agent_id, "") or "").strip() if isinstance(raw, dict) else ""
     cfg = _read_json(_resolve_project_root() / "data" / "agent_config.json", {})
     overrides = cfg.get("modelOverrides", {}) if isinstance(cfg, dict) else {}
     if not isinstance(overrides, dict):
