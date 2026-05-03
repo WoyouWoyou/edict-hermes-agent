@@ -67,6 +67,7 @@ cp edict/.env.example edict/.env
 ```bash
 ./scripts/docker_mac_light.sh hermes --version
 ./scripts/docker_mac_light.sh hermes --profile taizi chat --quiet --source edict -q "只回复：Hermes OK"
+./scripts/smoke_test.sh
 ```
 
 下达一条旨意：
@@ -76,6 +77,8 @@ cp edict/.env.example edict/.env
 ```
 
 如果你希望从 Dashboard 直接创建任务，可以进入“旨意看板”或“旨库”创建。Dispatcher 会把任务依次交给 Hermes profiles。
+
+更完整的本地验收步骤见 [手动测试指南](docs/manual-test.md)。
 
 ## Docker 说明
 

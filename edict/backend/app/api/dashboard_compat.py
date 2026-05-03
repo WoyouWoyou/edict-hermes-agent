@@ -39,6 +39,7 @@ router = APIRouter()
 
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_SKILL_BYTES = 10 * 1024 * 1024
+_OFFICIALS_SYNC_LAST_ATTEMPT = 0.0
 
 
 AGENT_META = {
@@ -174,6 +175,11 @@ class ModelBody(BaseModel):
 
 class DispatchChannelBody(BaseModel):
     channel: str
+
+
+class ProfileTestBody(BaseModel):
+    agentId: str
+    prompt: str = "只回复：Hermes OK"
 
 
 class AddSkillBody(BaseModel):
@@ -539,6 +545,55 @@ def _profile_skill_dir(agent_id: str, skill_name: str) -> Path:
     return _profile_dir(agent_id) / "skills" / skill_name
 
 
+def _read_profile_scalar(config_path: Path, key: str) -> str:
+    if not config_path.exists():
+        return ""
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*:\s*[\"']?([^\"'#\n]+)")
+    try:
+        for line in config_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            match = pattern.match(line)
+            if match:
+                return match.group(1).strip()
+    except OSError:
+        return ""
+    return ""
+
+
+def _profile_status(agent_id: str, agent_row: dict[str, Any] | None = None) -> dict[str, Any]:
+    pdir = _profile_dir(agent_id)
+    config_path = pdir / "config.yaml"
+    env_path = pdir / ".env"
+    skills_dir = pdir / "skills"
+    meta = AGENT_META.get(agent_id, {})
+    model = _read_profile_scalar(config_path, "model") or (agent_row or {}).get("model") or ""
+    provider = _read_profile_scalar(config_path, "provider")
+    skills = (agent_row or {}).get("skills") or []
+    if not isinstance(skills, list):
+        skills = []
+    if not skills and skills_dir.exists():
+        skills = [
+            {"name": path.parent.name, "path": str(path), "exists": True, "description": ""}
+            for path in sorted(skills_dir.glob("*/SKILL.md"))
+        ]
+    return {
+        "id": agent_id,
+        "label": (agent_row or {}).get("label") or meta.get("label") or agent_id,
+        "emoji": (agent_row or {}).get("emoji") or meta.get("emoji") or "🏛️",
+        "role": (agent_row or {}).get("role") or meta.get("role") or "",
+        "duty": (agent_row or {}).get("duty") or meta.get("duty") or "",
+        "profile": str(pdir),
+        "profileExists": pdir.exists(),
+        "configExists": config_path.exists(),
+        "envExists": env_path.exists(),
+        "skillsDirExists": skills_dir.exists(),
+        "skillsCount": len(skills),
+        "skills": skills,
+        "model": model,
+        "provider": provider,
+        "runtime": "hermes",
+    }
+
+
 def _find_profile_config_source(target_agent_id: str | None = None) -> Path | None:
     root = _hermes_home() / "profiles"
     preferred = [
@@ -615,6 +670,88 @@ def _sync_agent_config() -> None:
     cfg["runtime"] = "hermes"
     cfg["hermesHome"] = str(_hermes_home())
     _write_json("agent_config.json", cfg)
+
+
+def _maybe_sync_officials_stats() -> None:
+    global _OFFICIALS_SYNC_LAST_ATTEMPT
+    script = _project_root() / "scripts" / "sync_officials_stats.py"
+    if not script.exists():
+        return
+    cached = _read_json("officials_stats.json", {})
+    generated = _parse_dt(cached.get("generatedAt")) if isinstance(cached, dict) else None
+    if generated and (datetime.now(timezone.utc) - generated).total_seconds() < 30:
+        return
+    if time.time() - _OFFICIALS_SYNC_LAST_ATTEMPT < 30:
+        return
+    _OFFICIALS_SYNC_LAST_ATTEMPT = time.time()
+    try:
+        subprocess.run(
+            [sys.executable, str(script)],
+            cwd=str(_project_root()),
+            env={**os.environ, "HERMES_HOME": str(_hermes_home())},
+            check=False,
+            timeout=12,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return
+
+
+def _merge_runtime_official_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    _maybe_sync_officials_stats()
+    runtime = _read_json("officials_stats.json", {})
+    runtime_rows = {
+        row.get("id"): row
+        for row in runtime.get("officials", [])
+        if isinstance(row, dict) and row.get("id")
+    } if isinstance(runtime, dict) else {}
+    if not runtime_rows:
+        stats["statsSource"] = "tasks"
+        return stats
+
+    token_fields = (
+        "model",
+        "model_short",
+        "tokens_in",
+        "tokens_out",
+        "cache_read",
+        "cache_write",
+        "cost_cny",
+        "cost_usd",
+        "sessions",
+        "messages",
+        "last_active",
+    )
+    for row in stats.get("officials", []):
+        runtime_row = runtime_rows.get(row.get("id")) or {}
+        for field in token_fields:
+            value = runtime_row.get(field)
+            if value not in (None, ""):
+                row[field] = value
+        row["merit_score"] = (
+            int(row.get("tasks_done") or 0) * 10
+            + int(row.get("tasks_active") or 0) * 3
+            + int(row.get("flow_participations") or 0) * 2
+            + min(int(row.get("sessions") or 0), 20)
+            + int(row.get("messages") or 0)
+        )
+
+    ranked = sorted(stats.get("officials", []), key=lambda row: (-int(row.get("merit_score") or 0), row.get("id") or ""))
+    for idx, row in enumerate(ranked, start=1):
+        row["merit_rank"] = idx
+    top = ranked[0]["label"] if ranked and ranked[0].get("merit_score", 0) > 0 else ""
+    stats["top_official"] = top
+    stats["totals"] = {
+        **(stats.get("totals") or {}),
+        "tokens_total": sum((row.get("tokens_in") or 0) + (row.get("tokens_out") or 0) for row in stats.get("officials", [])),
+        "cache_total": sum((row.get("cache_read") or 0) + (row.get("cache_write") or 0) for row in stats.get("officials", [])),
+        "cost_cny": round(sum(row.get("cost_cny") or 0 for row in stats.get("officials", [])), 2),
+        "cost_usd": round(sum(row.get("cost_usd") or 0 for row in stats.get("officials", [])), 4),
+    }
+    stats["statsSource"] = "hermes_sessions+tasks"
+    stats["runtimeGeneratedAt"] = runtime.get("generatedAt", "")
+    return stats
 
 
 def _read_source_text(source_url: str) -> tuple[str, str]:
@@ -1028,10 +1165,76 @@ async def model_change_log():
     return _read_json("model_change_log.json", [])
 
 
+@router.get("/hermes-profile-status")
+async def hermes_profile_status():
+    _sync_agent_config()
+    cfg = _read_json("agent_config.json", {})
+    agents = cfg.get("agents", []) if isinstance(cfg, dict) else []
+    by_id = {agent.get("id"): agent for agent in agents if isinstance(agent, dict) and agent.get("id")}
+    agent_ids = [agent_id for agent_id in AGENT_META if agent_id in by_id] or list(AGENT_META)
+    return {
+        "ok": True,
+        "runtime": "hermes",
+        "hermesHome": str(_hermes_home()),
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "agents": [_profile_status(agent_id, by_id.get(agent_id)) for agent_id in agent_ids],
+    }
+
+
+@router.post("/hermes-profile-test")
+async def hermes_profile_test(body: ProfileTestBody):
+    agent_id = _validate_agent_id(body.agentId)
+    _ensure_profile_runtime_config(agent_id)
+    prompt = (body.prompt or "只回复：Hermes OK").strip()[:500]
+    settings = get_settings()
+    cmd = [
+        settings.hermes_bin,
+        "--profile",
+        agent_id,
+        "chat",
+        "--quiet",
+        "--source",
+        settings.hermes_source,
+        "-q",
+        prompt,
+    ]
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(_hermes_home())
+    env["HERMES_PROJECT_DIR"] = settings.hermes_project_dir or str(_project_root())
+    env["HERMES_SOURCE"] = settings.hermes_source
+    started = time.time()
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=int(os.environ.get("HERMES_PROFILE_TEST_TIMEOUT_SEC", "60")),
+            env=env,
+            cwd=settings.hermes_project_dir or str(_project_root()),
+        )
+    except FileNotFoundError:
+        return {"ok": False, "agentId": agent_id, "error": f"Hermes CLI not found: {settings.hermes_bin}"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "agentId": agent_id, "error": "Hermes profile test timed out"}
+
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    return {
+        "ok": proc.returncode == 0,
+        "agentId": agent_id,
+        "returncode": proc.returncode,
+        "elapsedSec": round(time.time() - started, 2),
+        "stdout": stdout[-2000:],
+        "stderr": stderr[-2000:],
+        "command": " ".join(cmd[:-1] + ["<prompt>"]),
+        "message": "Hermes profile 可用" if proc.returncode == 0 else "Hermes profile 测试失败",
+    }
+
+
 @router.get("/officials-stats")
 async def officials_stats(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Task).order_by(Task.updated_at.desc()).limit(1000))
-    return _build_officials_from_tasks(list(result.scalars().all()))
+    return _merge_runtime_official_stats(_build_officials_from_tasks(list(result.scalars().all())))
 
 
 @router.get("/agents-status")

@@ -33,6 +33,7 @@ export const api = {
   morningBrief: () => fetchJ<MorningBrief>(`${API_BASE}/api/morning-brief`),
   morningConfig: () => fetchJ<SubConfig>(`${API_BASE}/api/morning-config`),
   agentsStatus: () => fetchJ<AgentsStatusData>(`${API_BASE}/api/agents-status`),
+  hermesProfileStatus: () => fetchJ<HermesProfileStatusData>(`${API_BASE}/api/hermes-profile-status`),
 
   // 任务实时动态
   taskActivity: (id: string) =>
@@ -51,6 +52,8 @@ export const api = {
     postJ<ActionResult>(`${API_BASE}/api/set-model`, { agentId, model }),
   setDispatchChannel: (channel: string) =>
     postJ<ActionResult>(`${API_BASE}/api/set-dispatch-channel`, { channel }),
+  testHermesProfile: (agentId: string, prompt = '只回复：Hermes OK') =>
+    postJ<HermesProfileTestResult>(`${API_BASE}/api/hermes-profile-test`, { agentId, prompt }),
   agentWake: (agentId: string) =>
     postJ<ActionResult>(`${API_BASE}/api/agent-wake`, { agentId }),
   taskAction: (taskId: string, action: string, reason: string) =>
@@ -173,7 +176,13 @@ export interface AgentInfo {
   label: string;
   emoji: string;
   role: string;
+  duty?: string;
   model: string;
+  defaultModel?: string;
+  workspace?: string;
+  profile?: string;
+  profileExists?: boolean;
+  runtime?: string;
   skills: SkillInfo[];
 }
 
@@ -181,6 +190,7 @@ export interface SkillInfo {
   name: string;
   description: string;
   path: string;
+  exists?: boolean;
 }
 
 export interface KnownModel {
@@ -257,6 +267,44 @@ export interface AgentsStatusData {
   gateway: GatewayStatus;
   agents: AgentStatusInfo[];
   checkedAt: string;
+}
+
+export interface HermesProfileInfo {
+  id: string;
+  label: string;
+  emoji: string;
+  role: string;
+  duty?: string;
+  profile: string;
+  profileExists: boolean;
+  configExists: boolean;
+  envExists: boolean;
+  skillsDirExists: boolean;
+  skillsCount: number;
+  skills: SkillInfo[];
+  model: string;
+  provider?: string;
+  runtime: string;
+}
+
+export interface HermesProfileStatusData {
+  ok: boolean;
+  runtime: string;
+  hermesHome: string;
+  generatedAt: string;
+  agents: HermesProfileInfo[];
+}
+
+export interface HermesProfileTestResult {
+  ok: boolean;
+  agentId: string;
+  returncode?: number;
+  elapsedSec?: number;
+  stdout?: string;
+  stderr?: string;
+  command?: string;
+  message?: string;
+  error?: string;
 }
 
 export interface MorningNewsItem {
