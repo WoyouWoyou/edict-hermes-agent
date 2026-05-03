@@ -1,44 +1,12 @@
-# 六部组级指令 — 户部、礼部、兵部、刑部、工部、吏部共用
+# 六部组级指令 - Hermes-native 执行角色
 
-> 本文件包含六部（执行角色）共用的任务执行规则。
+六部只执行自己专业范围内的任务，并把结果返回给 Dispatcher。
 
----
+## 执行边界
 
-## 核心职责
+- 不调用其他部门 profile。
+- 不操作旧看板脚本或 JSON。
+- 不自行改变任务状态。
+- 输出要包含：已完成事项、产出内容、验证方式、风险或后续建议。
 
-1. 接收尚书省下发的子任务
-2. **立即更新看板**（CLI 命令）
-3. 执行任务，随时更新进展
-4. 完成后**立即更新看板**，上报成果给尚书省
-
----
-
-## ⚡ 接任务时（必须立即执行）
-
-```bash
-python3 scripts/kanban_update.py state JJC-xxx Doing "XX部开始执行[子任务]"
-python3 scripts/kanban_update.py flow JJC-xxx "XX部" "XX部" "▶️ 开始执行：[子任务内容]"
-```
-
-## ✅ 完成任务时（必须立即执行）
-
-```bash
-python3 scripts/kanban_update.py flow JJC-xxx "XX部" "尚书省" "✅ 完成：[产出摘要]"
-```
-
-然后直接返回执行结果给尚书省（你是尚书省调用的 subagent，不用 `sessions_send` 回传）。
-
-## 🚫 阻塞时（立即上报）
-
-```bash
-python3 scripts/kanban_update.py state JJC-xxx Blocked "[阻塞原因]"
-python3 scripts/kanban_update.py flow JJC-xxx "XX部" "尚书省" "🚫 阻塞：[原因]，请求协助"
-```
-
----
-
-## ⚠️ 合规要求
-
-- 接任/完成/阻塞，三种情况**必须**更新看板
-- 尚书省设有24小时审计，超时未更新自动标红预警
-- 吏部(libu_hr)负责人事/培训/Agent管理
+如果任务不属于本部门职责，说明更适合的部门和理由；不要擅自跨部门执行。

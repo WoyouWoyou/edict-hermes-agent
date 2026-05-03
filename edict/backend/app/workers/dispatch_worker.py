@@ -27,7 +27,12 @@ from datetime import datetime, timezone
 
 from ..config import get_settings
 from ..db import async_session
-from ..models.task import TaskState, ORG_AGENT_MAP
+from ..models.task import (
+    TaskState,
+    ORG_AGENT_MAP,
+    STATE_TRANSITIONS,
+    TERMINAL_STATES,
+)
 from ..services.event_bus import (
     EventBus,
     TOPIC_TASK_DISPATCH,
@@ -127,6 +132,31 @@ def _continuation_message(original: str, stdout: str, reason: str) -> str:
         )
     return original
 
+
+def _extract_deliverable(text: str) -> str:
+    """Prefer the actual artifact body over wrapper/review text."""
+    value = (text or "").strip()
+    for marker in ("以下为最终交付物：", "以下为最终交付物:", "最终交付物：", "最终正文："):
+        idx = value.find(marker)
+        if idx >= 0:
+            value = value[idx + len(marker):].strip()
+            if value.startswith("---"):
+                value = value[3:].strip()
+            break
+    match = re.search(r"(?m)^#\s+.+", value)
+    if match:
+        value = value[match.start():].strip()
+    return value
+
+
+def _find_prior_deliverable(progress_log: list[dict] | None) -> str:
+    """Find a prior execution artifact when the final review is only an approval."""
+    for entry in reversed(progress_log or []):
+        text = str(entry.get("content") or entry.get("text") or "").strip()
+        if "以下为最终交付物" in text or re.search(r"(?m)^#\s+.+", text):
+            return _extract_deliverable(text)
+    return ""
+
 # Agent 分组映射 — 用于加载 group 级 prompt
 _GROUP_MAP = {
     "taizi": "sansheng",
@@ -225,7 +255,11 @@ def _build_task_context(payload: dict) -> str:
 
 def _build_reminder(agent_id: str, payload: dict) -> str:
     """在 prompt 尾部注入动态提醒（借鉴 Claude 的 reminderInstructions）。"""
-    reminders = []
+    reminders = [
+        "Hermes-native 模式：不要调用 scripts/kanban_update.py，不要读写旧 JSON 看板，不要寻找 __REPO_DIR__；任务状态由 Edict Dispatcher 在你返回后统一更新。",
+        "不要在当前 profile 内自行调用其他 profile/subagent。只完成本阶段职责并返回清晰结论、方案或交付物，Dispatcher 会把任务交给下一个 profile。",
+        "使用当前任务 UUID 作为唯一任务 ID；JJC-* 只是前端展示标签或旧系统标签，不能拿来操作状态。",
+    ]
 
     state = payload.get("state", "")
     if state == "Doing":
@@ -504,8 +538,26 @@ class DispatchWorker:
         message = payload.get("message", "")
         trace_id = event.get("trace_id", "")
         state = payload.get("state", "")
+        event_state = state
         if task_id:
             payload = await self._hydrate_payload(task_id, payload)
+            state = payload.get("state", state)
+            agent = payload.get("agent", agent)
+            message = payload.get("message", message)
+
+        terminal_values = {s.value for s in TERMINAL_STATES}
+        if task_id and state in terminal_values:
+            log.info(f"Skipping dispatch for terminal task {task_id} state={state}")
+            await self.bus.ack(TOPIC_TASK_DISPATCH, GROUP, entry_id)
+            return
+
+        if task_id and event_state and state and state != event_state:
+            log.info(
+                f"Skipping stale dispatch for task {task_id}: "
+                f"event_state={event_state}, current_state={state}"
+            )
+            await self.bus.ack(TOPIC_TASK_DISPATCH, GROUP, entry_id)
+            return
 
         # 去重：同一任务如果已在派发中，跳过并 ACK
         if task_id in self._inflight:
@@ -723,6 +775,7 @@ class DispatchWorker:
                     f"💀 Dispatch dead-lettered: {task_id} → {agent} "
                     f"(retryable={e.retryable}, requeues={dispatch_retry_count}): {e}"
                 )
+                await self._mark_task_blocked(task_id, agent, str(e))
                 await self.bus.publish(
                     topic=TOPIC_TASK_STALLED,
                     trace_id=trace_id,
@@ -884,22 +937,37 @@ class DispatchWorker:
             log.warning(f"Could not hydrate dispatch payload for {task_id}: {exc}")
             return payload
 
-        merged = {**task_data, **payload}
-        for key in (
-            "title",
-            "description",
-            "priority",
-            "tags",
-            "todos",
-            "flow_log",
-            "progress_log",
-            "block",
-            "meta",
-            "assignee_org",
-        ):
-            if not payload.get(key):
-                merged[key] = task_data.get(key)
+        event_fields = {}
+        for key in ("agent", "message", "dispatch_retry_count", "stall_count"):
+            if key in payload:
+                event_fields[key] = payload[key]
+        merged = {**payload, **task_data, **event_fields}
         return merged
+
+    async def _mark_task_blocked(self, task_id: str, agent: str, reason: str) -> None:
+        """Stop automatic loops by marking the current task as blocked when possible."""
+        try:
+            task_uuid = uuid.UUID(task_id)
+        except ValueError:
+            return
+
+        content = (
+            f"Hermes 自动派发已停止：{reason}。"
+            "任务已进入人工检查状态；请查看日志、调整 profile/模型配置后再恢复或重试。"
+        )
+        try:
+            async with async_session() as session:
+                svc = TaskService(session)
+                task = await svc.get_task(task_uuid)
+                current = task.state if isinstance(task.state, TaskState) else TaskState(str(task.state))
+                if current in TERMINAL_STATES:
+                    return
+                if current != TaskState.Blocked and TaskState.Blocked in STATE_TRANSITIONS.get(current, set()):
+                    await svc.transition_state(task_uuid, TaskState.Blocked, agent, content)
+                else:
+                    await svc.add_progress(task_uuid, agent, content)
+        except Exception as exc:
+            log.warning(f"Could not mark task blocked for {task_id}: {exc}")
 
     async def _record_agent_wait(
         self,
@@ -943,7 +1011,14 @@ class DispatchWorker:
             if not next_state:
                 return
             try:
-                await svc.transition_state(task_uuid, next_state, agent, "Hermes agent completed this stage")
+                updated = await svc.transition_state(task_uuid, next_state, agent, "Hermes agent completed this stage")
+                if current == TaskState.Doing and next_state == TaskState.Review:
+                    updated.output = _extract_deliverable(content)[:20000]
+                    await session.commit()
+                elif next_state == TaskState.Done:
+                    final_output = (updated.output or "").strip() or _find_prior_deliverable(updated.progress_log)
+                    updated.output = (final_output or _extract_deliverable(content))[:20000]
+                    await session.commit()
                 log.info(f"📌 Task {task_id} auto-advanced {current.value} → {next_state.value}")
             except Exception as exc:
                 log.warning(f"Could not auto-advance task {task_id} from {current.value}: {exc}")
