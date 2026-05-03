@@ -109,6 +109,19 @@ HERMES_TEST_PROFILE=zhongshu ./scripts/smoke_test.sh
 ./scripts/docker_mac_light.sh logs frontend
 ```
 
+如果 dispatcher 日志里出现 `Reached maximum iterations`、`429`、`rate limit` 等提示，任务不应立刻进入下一阶段。Dispatcher 会先记录等待进展，限速时默认等待 90 秒再试；最大迭代次数耗尽时默认等待 8 秒，并把下一轮 `--max-turns` 从 3 提高到 6，再继续当前阶段。
+
+可通过环境变量调节：
+
+```bash
+DISPATCH_HERMES_RETRY_ATTEMPTS=3
+DISPATCH_HERMES_RATE_LIMIT_WAIT_SEC=90
+DISPATCH_HERMES_CONTINUE_WAIT_SEC=8
+DISPATCH_HERMES_MAX_TURNS_CAP=12
+```
+
+确认 Hermes 当前阶段没有限速/最大迭代中断后，任务才会自动流转到下一个阶段。
+
 重新启动：
 
 ```bash

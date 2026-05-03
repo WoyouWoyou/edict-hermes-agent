@@ -73,6 +73,71 @@ def test_call_hermes_builds_profile_command(monkeypatch, tmp_path):
     assert "EDICT_CONTEXT_FILE" in call["env"]
 
 
+def test_call_hermes_can_override_max_turns(monkeypatch, tmp_path):
+    from app.workers import dispatch_worker
+    monkeypatch.delenv("DISPATCH_HERMES_TOOLSETS", raising=False)
+
+    settings = SimpleNamespace(
+        hermes_bin="hermes",
+        hermes_home=str(tmp_path / ".hermes"),
+        hermes_project_dir=str(tmp_path),
+        hermes_source="edict",
+        hermes_model="",
+        hermes_provider="",
+        hermes_toolsets="",
+        port=8000,
+        dispatch_timeout_sec=12,
+    )
+    monkeypatch.setattr(dispatch_worker, "get_settings", lambda: settings)
+
+    call = {}
+
+    def fake_run(cmd, capture_output, text, timeout, env, cwd):
+        call["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="done", stderr="")
+
+    monkeypatch.setattr(dispatch_worker.subprocess, "run", fake_run)
+
+    worker = object.__new__(dispatch_worker.DispatchWorker)
+    asyncio.run(worker._call_hermes(
+        agent="taizi",
+        message="hello",
+        task_id="T-1",
+        trace_id="trace-1",
+        max_turns=8,
+    ))
+
+    assert call["cmd"][call["cmd"].index("--max-turns") + 1] == "8"
+
+
+def test_retryable_interruption_detection():
+    from app.workers import dispatch_worker
+
+    assert dispatch_worker._classify_retryable_interruption({
+        "returncode": 0,
+        "stdout": "⚠️  Reached maximum iterations (3). Requesting summary...",
+        "stderr": "",
+    }) == "max_iterations"
+    assert dispatch_worker._classify_retryable_interruption({
+        "returncode": 1,
+        "stdout": "",
+        "stderr": "429 Too Many Requests: rate limit exceeded",
+    }) == "rate_limit"
+    assert dispatch_worker._classify_retryable_interruption({
+        "returncode": 0,
+        "stdout": "最终产出：Hermes OK",
+        "stderr": "",
+    }) is None
+
+
+def test_max_turns_growth_is_capped(monkeypatch):
+    from app.workers import dispatch_worker
+
+    monkeypatch.setenv("DISPATCH_HERMES_MAX_TURNS_CAP", "10")
+    assert dispatch_worker._grow_max_turns(3) == 6
+    assert dispatch_worker._grow_max_turns(6) == 10
+
+
 def test_bootstrap_builds_layered_soul():
     import bootstrap_hermes_profiles as bootstrap
 

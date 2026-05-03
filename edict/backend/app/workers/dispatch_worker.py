@@ -51,6 +51,82 @@ class DispatchError(Exception):
         super().__init__(msg)
         self.retryable = retryable
 
+
+_MAX_ITERATION_MARKERS = (
+    "reached maximum iterations",
+    "maximum iterations",
+    "requesting summary",
+    "max iterations",
+    "maximum turns",
+    "max turns",
+)
+
+_RATE_LIMIT_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "429",
+    "too many requests",
+    "quota exceeded",
+    "rate_limit_exceeded",
+    "overloaded",
+    "temporarily unavailable",
+    "try again later",
+    "限速",
+    "请求过多",
+    "频率限制",
+    "配额",
+)
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _classify_retryable_interruption(result: dict) -> str | None:
+    """Return a retry reason when Hermes returned before the agent truly finished."""
+    text = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
+    if any(marker in text for marker in _RATE_LIMIT_MARKERS):
+        return "rate_limit"
+    if any(marker in text for marker in _MAX_ITERATION_MARKERS):
+        return "max_iterations"
+    return None
+
+
+def _retry_wait_seconds(reason: str, attempt: int) -> int:
+    if reason == "rate_limit":
+        base = _env_int("DISPATCH_HERMES_RATE_LIMIT_WAIT_SEC", 90)
+    elif reason == "max_iterations":
+        base = _env_int("DISPATCH_HERMES_CONTINUE_WAIT_SEC", 8)
+    else:
+        base = _env_int("DISPATCH_HERMES_RETRY_WAIT_SEC", 20)
+    cap = _env_int("DISPATCH_HERMES_RETRY_MAX_WAIT_SEC", 240)
+    return min(cap, base * (2 ** max(0, attempt - 1)))
+
+
+def _max_turns_cap() -> int:
+    return _env_int("DISPATCH_HERMES_MAX_TURNS_CAP", 12)
+
+
+def _grow_max_turns(current: int) -> int:
+    return min(_max_turns_cap(), max(current + 1, current * 2))
+
+
+def _continuation_message(original: str, stdout: str, reason: str) -> str:
+    excerpt = (stdout or "").strip()[-2500:]
+    if reason == "max_iterations":
+        return (
+            f"{original}\n\n---\n"
+            "上一轮 Hermes 提示达到最大迭代次数，说明任务尚未彻底完成。"
+            "请基于已有产出继续完成同一阶段，必须给出明确的最终结论或交付物；"
+            "不要要求人工手动推进看板，除非确实缺少外部权限。\n\n"
+            f"上一轮阶段性输出：\n{excerpt}"
+        )
+    return original
+
 # Agent 分组映射 — 用于加载 group 级 prompt
 _GROUP_MAP = {
     "taizi": "sansheng",
@@ -421,7 +497,8 @@ class DispatchWorker:
 
     async def _dispatch(self, entry_id: str, event: dict):
         """执行一次 agent 派发（桶级并发控制）。"""
-        payload = event.get("payload", {})
+        event_payload = event.get("payload", {})
+        payload = dict(event_payload)
         task_id = payload.get("task_id", "")
         agent = payload.get("agent", "")
         message = payload.get("message", "")
@@ -467,91 +544,184 @@ class DispatchWorker:
             )
 
             try:
-                start_time = time.monotonic()
-                result = await self._call_hermes(agent, enriched_message, task_id, trace_id, payload)
-                elapsed = time.monotonic() - start_time
+                settings = get_settings()
+                attempt_limit = _env_int(
+                    "DISPATCH_HERMES_RETRY_ATTEMPTS",
+                    getattr(settings, "max_dispatch_retry", 3),
+                )
+                max_turns = _env_int("DISPATCH_HERMES_MAX_TURNS", 3)
+                attempt_message = enriched_message
 
-                # 记录执行时间（仅用于监控和告警）
-                self._durations.setdefault(agent, []).append(elapsed)
-                if len(self._durations[agent]) > 20:
-                    self._durations[agent] = self._durations[agent][-20:]
-                avg = sum(self._durations[agent]) / len(self._durations[agent])
-                if elapsed > 2 * avg and elapsed > 120:
-                    log.warning(f"⚠️ Agent {agent} slowdown: {elapsed:.0f}s (avg: {avg:.0f}s)")
+                for attempt in range(1, attempt_limit + 1):
+                    start_time = time.monotonic()
+                    result = await self._call_hermes(
+                        agent,
+                        attempt_message,
+                        task_id,
+                        trace_id,
+                        payload,
+                        max_turns=max_turns,
+                    )
+                    elapsed = time.monotonic() - start_time
 
-                # Prompt 注入检测
-                stdout = result.get("stdout", "")
-                stdout, injection_warnings = _sanitize_agent_output(stdout, agent)
-                if injection_warnings:
-                    for w in injection_warnings:
-                        log.warning(f"🛡️ {w}")
-                    # 发布注入告警事件
+                    # 记录执行时间（仅用于监控和告警）
+                    self._durations.setdefault(agent, []).append(elapsed)
+                    if len(self._durations[agent]) > 20:
+                        self._durations[agent] = self._durations[agent][-20:]
+                    avg = sum(self._durations[agent]) / len(self._durations[agent])
+                    if elapsed > 2 * avg and elapsed > 120:
+                        log.warning(f"⚠️ Agent {agent} slowdown: {elapsed:.0f}s (avg: {avg:.0f}s)")
+
+                    # Prompt 注入检测
+                    stdout = result.get("stdout", "")
+                    stdout, injection_warnings = _sanitize_agent_output(stdout, agent)
+                    result["stdout"] = stdout
+                    if injection_warnings:
+                        for w in injection_warnings:
+                            log.warning(f"🛡️ {w}")
+                        # 发布注入告警事件
+                        await self.bus.publish(
+                            topic=TOPIC_TASK_STALLED,
+                            trace_id=trace_id,
+                            event_type="agent.injection.detected",
+                            producer="dispatcher",
+                            payload={
+                                "task_id": task_id,
+                                "agent": agent,
+                                "warnings": injection_warnings,
+                            },
+                        )
+
+                    # 发布 agent 输出
                     await self.bus.publish(
-                        topic=TOPIC_TASK_STALLED,
+                        topic=TOPIC_AGENT_THOUGHTS,
                         trace_id=trace_id,
-                        event_type="agent.injection.detected",
+                        event_type="agent.output",
+                        producer=f"agent.{agent}",
+                        payload={
+                            "task_id": task_id,
+                            "agent": agent,
+                            "output": stdout,
+                            "return_code": result.get("returncode", -1),
+                            "attempt": attempt,
+                            "max_turns": max_turns,
+                            "injection_warnings": injection_warnings or None,
+                        },
+                    )
+
+                    interruption = _classify_retryable_interruption(result)
+                    if result.get("returncode") == 0 and not interruption:
+                        await self._record_agent_success(task_id, agent, stdout)
+                        log.info(f"✅ Agent '{agent}' completed task {task_id}")
+                        await self.bus.ack(TOPIC_TASK_DISPATCH, GROUP, entry_id)
+                        return
+
+                    if interruption and attempt < attempt_limit:
+                        wait_seconds = _retry_wait_seconds(interruption, attempt)
+                        if interruption == "max_iterations":
+                            max_turns = _grow_max_turns(max_turns)
+                            attempt_message = _continuation_message(enriched_message, stdout, interruption)
+                        reason_text = (
+                            "Hermes 达到最大迭代次数，等待后提高 max-turns 续跑"
+                            if interruption == "max_iterations"
+                            else "模型限速或服务繁忙，等待后重试"
+                        )
+                        await self._record_agent_wait(
+                            task_id,
+                            agent,
+                            reason_text,
+                            wait_seconds,
+                            attempt,
+                            attempt_limit,
+                        )
+                        await self.bus.publish(
+                            topic=TOPIC_AGENT_HEARTBEAT,
+                            trace_id=trace_id,
+                            event_type="agent.dispatch.wait",
+                            producer="dispatcher",
+                            payload={
+                                "task_id": task_id,
+                                "agent": agent,
+                                "reason": interruption,
+                                "wait_seconds": wait_seconds,
+                                "attempt": attempt,
+                                "max_attempts": attempt_limit,
+                            },
+                        )
+                        log.warning(
+                            f"⏳ Agent {agent} not finished ({interruption}); "
+                            f"waiting {wait_seconds}s before attempt {attempt + 1}/{attempt_limit}"
+                        )
+                        await asyncio.sleep(wait_seconds)
+                        continue
+
+                    if interruption:
+                        raise DispatchError(
+                            f"Hermes interrupted before completion: {interruption}",
+                            retryable=True,
+                        )
+
+                    # 失败分类
+                    stderr = result.get("stderr", "")
+                    stderr_lower = stderr.lower()
+                    if "TIMEOUT" in stderr:
+                        raise DispatchError("Agent timeout", retryable=True)
+                    elif "command not found" in stderr_lower:
+                        raise DispatchError("agent runtime binary missing", retryable=False)
+                    elif "profile" in stderr_lower and "does not exist" in stderr_lower:
+                        raise DispatchError("Hermes profile missing", retryable=False)
+                    elif result["returncode"] in (1, 2):
+                        raise DispatchError(
+                            f"Agent failed: rc={result['returncode']}", retryable=True
+                        )
+                    else:
+                        raise DispatchError(
+                            f"Unknown error: rc={result['returncode']}", retryable=False
+                        )
+
+            except DispatchError as e:
+                dispatch_retry_count = int(payload.get("dispatch_retry_count") or 0)
+                max_requeues = _env_int(
+                    "DISPATCH_HERMES_REQUEUE_ATTEMPTS",
+                    max(0, getattr(get_settings(), "max_dispatch_retry", 3) - 1),
+                    minimum=0,
+                )
+
+                if e.retryable and dispatch_retry_count < max_requeues:
+                    wait_seconds = _retry_wait_seconds("runtime", dispatch_retry_count + 1)
+                    log.warning(
+                        f"🔄 Retryable failure for {task_id}, requeue "
+                        f"{dispatch_retry_count + 1}/{max_requeues} after {wait_seconds}s: {e}"
+                    )
+                    await self._record_agent_wait(
+                        task_id,
+                        agent,
+                        f"Hermes 运行失败，准备重新派发：{e}",
+                        wait_seconds,
+                        dispatch_retry_count + 1,
+                        max_requeues,
+                    )
+                    await asyncio.sleep(wait_seconds)
+                    await self.bus.publish(
+                        topic=TOPIC_TASK_DISPATCH,
+                        trace_id=trace_id,
+                        event_type="task.dispatch.retry",
                         producer="dispatcher",
                         payload={
                             "task_id": task_id,
                             "agent": agent,
-                            "warnings": injection_warnings,
+                            "message": message,
+                            "state": state,
+                            "dispatch_retry_count": dispatch_retry_count + 1,
                         },
                     )
-
-                # 发布 agent 输出
-                await self.bus.publish(
-                    topic=TOPIC_AGENT_THOUGHTS,
-                    trace_id=trace_id,
-                    event_type="agent.output",
-                    producer=f"agent.{agent}",
-                    payload={
-                        "task_id": task_id,
-                        "agent": agent,
-                        "output": stdout,
-                        "return_code": result.get("returncode", -1),
-                        "injection_warnings": injection_warnings or None,
-                    },
-                )
-
-                if result.get("returncode") == 0:
-                    await self._record_agent_success(task_id, agent, stdout)
-                    log.info(f"✅ Agent '{agent}' completed task {task_id}")
                     await self.bus.ack(TOPIC_TASK_DISPATCH, GROUP, entry_id)
                     return
-
-                # 失败分类
-                stderr = result.get("stderr", "")
-                stderr_lower = stderr.lower()
-                if "TIMEOUT" in stderr:
-                    raise DispatchError("Agent timeout", retryable=True)
-                elif "command not found" in stderr_lower:
-                    raise DispatchError("agent runtime binary missing", retryable=False)
-                elif "profile" in stderr_lower and "does not exist" in stderr_lower:
-                    raise DispatchError("Hermes profile missing", retryable=False)
-                elif result["returncode"] in (1, 2):
-                    raise DispatchError(
-                        f"Agent failed: rc={result['returncode']}", retryable=True
-                    )
-                else:
-                    raise DispatchError(
-                        f"Unknown error: rc={result['returncode']}", retryable=False
-                    )
-
-            except DispatchError as e:
-                delivery_count = await self.bus.get_delivery_count(
-                    TOPIC_TASK_DISPATCH, GROUP, entry_id
-                )
-
-                if e.retryable and delivery_count < 3:
-                    log.warning(
-                        f"🔄 Retryable failure for {task_id}, attempt {delivery_count + 1}/3: {e}"
-                    )
-                    return  # 不 ACK → Redis 自动重投递
 
                 # 不可重试 or 重试耗尽 → ACK + 发布失败事件 + DLQ
                 log.error(
                     f"💀 Dispatch dead-lettered: {task_id} → {agent} "
-                    f"(retryable={e.retryable}, attempts={delivery_count + 1}): {e}"
+                    f"(retryable={e.retryable}, requeues={dispatch_retry_count}): {e}"
                 )
                 await self.bus.publish(
                     topic=TOPIC_TASK_STALLED,
@@ -561,9 +731,10 @@ class DispatchWorker:
                     payload={
                         "task_id": task_id,
                         "agent": agent,
+                        "state": state,
                         "error": str(e),
                         "retryable": e.retryable,
-                        "attempts": delivery_count + 1,
+                        "attempts": dispatch_retry_count + 1,
                     },
                 )
                 await self.bus.publish(
@@ -592,10 +763,11 @@ class DispatchWorker:
         task_id: str,
         trace_id: str,
         payload: dict | None = None,
+        max_turns: int | None = None,
     ) -> dict:
         """异步调用 Hermes CLI — 在线程池中执行，带富上下文注入。"""
         settings = get_settings()
-        max_turns = os.environ.get("DISPATCH_HERMES_MAX_TURNS", "3")
+        max_turns_value = str(max_turns or _env_int("DISPATCH_HERMES_MAX_TURNS", 3))
         cmd = [
             settings.hermes_bin,
             "--profile", agent,
@@ -603,7 +775,7 @@ class DispatchWorker:
             "-Q",
             "--accept-hooks",
             "--source", settings.hermes_source,
-            "--max-turns", max_turns,
+            "--max-turns", max_turns_value,
         ]
         model_override = _agent_model_override(agent)
         if model_override:
@@ -728,6 +900,31 @@ class DispatchWorker:
             if not payload.get(key):
                 merged[key] = task_data.get(key)
         return merged
+
+    async def _record_agent_wait(
+        self,
+        task_id: str,
+        agent: str,
+        reason: str,
+        wait_seconds: int,
+        attempt: int,
+        max_attempts: int,
+    ) -> None:
+        """Record a non-terminal wait/retry note without advancing task state."""
+        try:
+            task_uuid = uuid.UUID(task_id)
+        except ValueError:
+            return
+        content = (
+            f"Hermes 暂未完成当前阶段：{reason}。"
+            f"将等待 {wait_seconds} 秒后重试（{attempt}/{max_attempts}），任务保持当前阶段。"
+        )
+        try:
+            async with async_session() as session:
+                svc = TaskService(session)
+                await svc.add_progress(task_uuid, agent, content)
+        except Exception as exc:
+            log.warning(f"Could not record wait state for {task_id}: {exc}")
 
     async def _record_agent_success(self, task_id: str, agent: str, stdout: str) -> None:
         """Persist Hermes output and move the task forward when the agent did not call tools."""
